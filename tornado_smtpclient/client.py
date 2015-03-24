@@ -1,9 +1,9 @@
 """
-Port the standard smtplib for use with tornado non-blocking application model 
+Port the standard smtplib for use with tornado non-blocking application model
 """
-from tornado import iostream 
+from tornado import iostream
 import socket
-import logging 
+import logging
 logger = logging.getLogger(__name__)
 from tornado import gen
 import smtplib
@@ -12,8 +12,18 @@ import base64
 import hmac
 from email.base64mime import body_encode as encode_base64
 
-try: 
-    import ssl 
+def _quote_periods(bindata):
+    return re.sub(br'(?m)^\.', b'..', bindata)
+
+def _fix_eols(data):
+    return  re.sub(r'(?:\r\n|\n|\r(?!\n))', CRLF, data)
+
+class ConnectionError(Exception):
+    pass
+
+
+try:
+    import ssl
 except ImportError:
     _have_ssl = False
 else:
@@ -40,19 +50,19 @@ class SMTPAsync(object):
         self.host = host
         self.port = port
 
-        if local_hostname: 
-            self.local_hostname = local_hostname 
+        if local_hostname:
+            self.local_hostname = local_hostname
         else:
-            fqdn = socket.getfqdn() 
+            fqdn = socket.getfqdn()
             if '.' in fqdn:
-                self.local_hostname = bytes(fqdn, 'utf-8') 
-            else: 
-                addr = '127.0.0.1' 
-                try: 
+                self.local_hostname = fqdn
+            else:
+                addr = '127.0.0.1'
+                try:
                     addr = socket.gethostbyname(socket.gethostname())
-                except socket.gaierror: 
-                    pass 
-                self.local_hostname = bytes('[%s]' % addr, 'utf-8')
+                except socket.gaierror:
+                    pass
+                self.local_hostname = '[%s]' % addr
 
     def _get_stream(self, host, port, timeout):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
@@ -68,7 +78,7 @@ class SMTPAsync(object):
     def docmd(self, cmd, args = None):
         yield self.putcmd(cmd, args)
         (code, msg) = yield self.getreply()
-        return (code, msg)
+        raise gen.Return((code, msg))
 
     @gen.coroutine
     def putcmd(self, name, param = None):
@@ -116,7 +126,7 @@ class SMTPAsync(object):
 
 
         msg = b'\n'.join(resp)
-        return (code,msg)
+        raise gen.Return((code, msg))
 
     @gen.coroutine
     def connect(self, host = None, port = None):
@@ -134,37 +144,37 @@ class SMTPAsync(object):
         self.host = host
         self.port = port
         (code, msg) = yield self.getreply()
-        return (code, msg)
+        raise gen.Return((code, msg))
 
 
     @gen.coroutine
     def starttls(self):
         #TODO: check how to read the local computer name
-        yield self.ehlo_or_helo_if_needed() 
-        if not self.has_extn('starttls'): 
+        yield self.ehlo_or_helo_if_needed()
+        if not self.has_extn('starttls'):
             raise smtplib.SMTPException('STARTTLS extension not supported ')
 
         code, msg = yield self.docmd(b'STARTTLS')
-        if code == 220: 
-            if not _have_ssl: 
+        if code == 220:
+            if not _have_ssl:
                 raise RuntimeError("No SSL support included in this Python ")
 
-            server_hostname = self.host if ssl.HAS_SNI else None
+            server_hostname = self.host# if ssl.HAS_SNI else None
             self.stream = yield self.stream.start_tls(False, server_hostname = server_hostname)
-            self.helo_resp = None 
-            self.ehlo_resp = None 
+            self.helo_resp = None
+            self.ehlo_resp = None
             self.esmtp_features = {}
-            self.does_esmtp = 0 
-        return (code, msg)
+            self.does_esmtp = 0
+        raise gen.Return((code, msg))
 
     @gen.coroutine
     def login(self, username, password):
-        def encode_cram_md5(challenge, username, password): 
-            challenge = base64.decodebytes(challenge)
+        def encode_cram_md5(challenge, username, password):
+            challenge = base64.decodestring(challenge)
             response = username + " " + hmac.HMAC(password.encode('ascii'), challenge, 'md5').hexdigest()
             return encode_base64(response.encode('ascii'), eol="")
 
-        def encode_plain(user, password): 
+        def encode_plain(user, password):
             return encode_base64(("\0%s\0%s" % (user, password)).encode('ascii'), eol="")
 
         AUTH_PLAIN = "PLAIN"
@@ -203,18 +213,18 @@ class SMTPAsync(object):
             # 235 == 'Authentication successful'
             # 503 == 'Error: already authenticated'
             if code in (235, 503):
-                return (code, resp)
+                raise gen.Return((code, resp))
 
         # We could not login sucessfully. Return result of last attempt.
         raise smtplib.SMTPAuthenticationError(code, resp)
-       
+
     @gen.coroutine
-    def ehlo_or_helo_if_needed(self): 
-        if not self.helo_resp and not self.ehlo_resp: 
-            code, resp = yield self.ehlo()   
+    def ehlo_or_helo_if_needed(self):
+        if not self.helo_resp and not self.ehlo_resp:
+            code, resp = yield self.ehlo()
             if not (200<= code <300):
                 code, resp = yield self.helo()
-                if not (200 <= code < 300): 
+                if not (200 <= code < 300):
                     raise ConnectionError("Hello error")
 
 
@@ -224,7 +234,7 @@ class SMTPAsync(object):
         self.putcmd("helo", name or self.local_hostname)
         (code,msg)= yield self.getreply()
         self.helo_resp=msg
-        return (code,msg)
+        raise gen.Return((code,msg))
 
 
 
@@ -240,7 +250,7 @@ class SMTPAsync(object):
             raise smtplib.SMTPServerDisconnected("Server not connected")
 
         if code != 250:
-            return (code, msg)
+            raise gen.Return((code, msg))
         self.does_esmtp =1
 
         #parse the ehlo response -ddm
@@ -268,7 +278,7 @@ class SMTPAsync(object):
                             + " " + params
                 else:
                     self.esmtp_features[feature]=params
-        return (code,msg)
+        raise gen.Return((code,msg))
 
 
     @gen.coroutine
@@ -277,13 +287,13 @@ class SMTPAsync(object):
         if options and self.does_esmtp:
             optionlist = ' ' + ' '.join(options)
         (code, msg) = yield self.docmd(b'mail', ('FROM:%s%s' % (smtplib.quoteaddr(sender), optionlist)).encode('ascii'))
-        return (code, msg)
+        raise gen.Return((code, msg))
 
     @gen.coroutine
     def rset(self):
         """SMTP 'rset' command -- resets session."""
         (code, msg) = yield self.docmd(b"rset")
-        return (code, msg)
+        raise gen.Return((code, msg))
 
     @gen.coroutine
     def _rset(self):
@@ -301,7 +311,7 @@ class SMTPAsync(object):
         if options and self.does_esmtp:
             optionlist = ' ' + ' '.join(options)
         code, msg = yield self.docmd(b"rcpt", ("TO:%s%s" % (smtplib.quoteaddr(recip), optionlist)).encode('ascii'))
-        return (code, msg)
+        raise gen.Return((code, msg))
 
     @gen.coroutine
     def data(self, msg):
@@ -313,15 +323,16 @@ class SMTPAsync(object):
             raise smtplib.SMTPDataError(code, repl)
         else:
             if isinstance(msg, str):
-                msg = smtplib._fix_eols(msg).encode('ascii')
-            q = smtplib._quote_periods(msg)
+                msg = _fix_eols(msg).encode('ascii')
+
+            q = _quote_periods(bytes(msg))
             if q[-2:] != CRLF:
                 q = q + CRLF
             q = q + b"." + CRLF
             #self.send(q)
             yield self.send(q)
             (code, msg) = yield self.getreply()
-            return (code, msg)
+            raise gen.Return((code, msg))
 
     @gen.coroutine
     def sendmail(self, from_addr, to_addrs, msg, mail_options=[],
@@ -330,7 +341,7 @@ class SMTPAsync(object):
         yield self.ehlo_or_helo_if_needed()
         esmtp_opts = []
         if isinstance(msg, str):
-            msg = smtplib._fix_eols(msg).encode('ascii')
+            msg = _fix_eols(msg).encode('ascii')
         if self.does_esmtp:
 
             if self.has_extn('size'):
@@ -367,17 +378,19 @@ class SMTPAsync(object):
                 yield self._rset()
             raise smtplib.SMTPDataError(code, resp)
         #if we got here then somebody got our mail
-        return senderrs
+        raise gen.Return(senderrs)
 
 
     @gen.coroutine
     def quit(self):
         yield self.docmd(b'quit')
-        self.close()
+        yield self.close()
 
+    @gen.coroutine
     def close(self):
         self.stream.close()
         self.stream = None
+        raise gen.Return(True)
 
 
 class SMTPAsyncException(Exception):
